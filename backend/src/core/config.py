@@ -2,7 +2,8 @@
 import os
 from pathlib import Path
 from typing import List
-from pydantic import BaseSettings  # DIRECT IMPORT - NO pydantic-settings!
+from pydantic_settings import BaseSettings  # CHANGED THIS LINE!
+from pydantic import Field  # Keep this for field configuration
 
 class Settings(BaseSettings):
     # Server
@@ -27,8 +28,10 @@ class Settings(BaseSettings):
     BASE_DIR: Path = Path(__file__).parent.parent.parent
     UPLOAD_PATH: Path = BASE_DIR / UPLOAD_DIR
     
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
+    # Changed from class Config to model_config
+    model_config = {
+        "env_file": ".env",
+        "case_sensitive": False
+    }
 
 settings = Settings()

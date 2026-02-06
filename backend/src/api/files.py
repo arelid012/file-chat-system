@@ -1,19 +1,16 @@
 # backend/src/api/files.py
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks  # Add BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime  # Only import once!
 from ..core.config import settings
 from ..core.database import mongodb
 from ..models.file import FileCreate
+from ..services.vector_service import vector_service
 import aiofiles
 import asyncio
 
 router = APIRouter(prefix="/files", tags=["files"])
-
-
-# Add this function right after your imports but before router definition
-# In backend/src/api/files.py, add this function near the top:
 
 async def extract_text_from_file(file_path: str, filename: str) -> str:
     """Process different file types to extract text"""
@@ -61,14 +58,17 @@ async def extract_text_from_file(file_path: str, filename: str) -> str:
         print(f"❌ Error processing {filename}: {e}")
         return f"Error processing file: {str(e)}"
 
-# File processing function (keep this the same)
 async def process_uploaded_file(file_path: str, filename: str, session_id: str):
     """Process uploaded file and store in MongoDB"""
     try:
         # Extract text based on file type
         text_content = await extract_text_from_file(file_path, filename)
         
-        # Store in MongoDB
+        # DEBUG: Print extracted text
+        print(f"\n📄 DEBUG - Extracted {len(text_content)} chars from {filename}")
+        print(f"First 500 chars: {text_content[:500]}\n")
+        
+        # Store file metadata in MongoDB
         file_data = FileCreate(
             filename=filename,
             original_filename=filename,
@@ -78,25 +78,37 @@ async def process_uploaded_file(file_path: str, filename: str, session_id: str):
             text_content=text_content
         )
         
-        # Insert into MongoDB
         result = await mongodb.db.files.insert_one({
             **file_data.dict(),
             "created_at": datetime.now(),
             "updated_at": datetime.now()
         })
         
-        print(f"✅ File processed and stored: {filename} (ID: {result.inserted_id})")
+        # ===== Create vector embeddings =====
+        try:
+            metadata = {
+                "session_id": session_id,
+                "filename": filename,
+                "file_id": str(result.inserted_id),
+                "original_text_length": len(text_content)
+            }
+            
+            chunk_ids = vector_service.create_chunks_and_embeddings(text_content, metadata)
+            print(f"✅ Created {len(chunk_ids)} vector embeddings for {filename}")
+        except Exception as e:
+            print(f"⚠️ Vector embedding failed (but file stored): {e}")
+        # ===================================
+        
+        print(f"✅ File processed and stored: {filename}")
         return str(result.inserted_id)
         
     except Exception as e:
         print(f"❌ Error processing file: {e}")
         raise
 
-# Keep extract_text_from_file function the same
-
 @router.post("/upload")
 async def upload_file(
-    background_tasks: BackgroundTasks,  # Add this parameter
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...)
 ):
     """Handle file upload"""
@@ -140,29 +152,31 @@ async def upload_file(
     except Exception as e:
         print(f"❌ Upload failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
-    
-# backend/src/api/files.py - Add this endpoint
+
 @router.delete("/{session_id}")
 async def delete_file(session_id: str):
     """Delete a file by session ID"""
     try:
-        # Delete from MongoDB
+        # Delete from MongoDB files collection
         result = await mongodb.db.files.delete_one({"session_id": session_id})
         
         if result.deleted_count == 0:
             raise HTTPException(status_code=404, detail="File not found")
         
-        # Also delete the uploaded file if exists
-        import os
+        # Delete vector embeddings
+        try:
+            vector_service.delete_session_chunks(session_id)
+        except Exception as e:
+            print(f"⚠️ Failed to delete vector embeddings: {e}")
+        
+        # Delete uploaded file
         upload_dir = settings.UPLOAD_PATH
         for file in os.listdir(upload_dir):
             if file.startswith(session_id):
                 os.remove(os.path.join(upload_dir, file))
                 break
         
-        return {"status": "success", "message": "File deleted successfully"}
+        return {"status": "success", "message": "File and embeddings deleted successfully"}
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-# Keep list_files function the same
