@@ -23,23 +23,44 @@ async def ask_question(question: QuestionRequest):
                     session_id=question.session_id,
                     limit=3
                 )
-                
-                # Prepare context from relevant chunks
-                context = "\n\n".join([chunk["chunk_text"] for chunk in relevant_chunks])
-                
+                        
                 if relevant_chunks:
                     filename = relevant_chunks[0]["filename"] if relevant_chunks else "Unknown"
                 
             except Exception as e:
                 logger.warning(f"Vector search failed: {e}, falling back to full text")
-        
-        # Fallback to full text if no relevant chunks found
-        if not context and question.session_id:
-            file_data = await mongodb.db.files.find_one({"session_id": question.session_id})
-            if file_data:
-                context = file_data.get("text_content", "")[:2000]
-                filename = file_data.get("filename", "Unknown")
-        
+
+        # HARD STOP if no context found for selected file
+        if question.session_id and not relevant_chunks:
+            return ChatResponse(
+                answer=(
+                    "I can't find any readable content for the selected file yet. "
+                    "It may still be processing or the document has no extractable text."
+                ),
+                language=question.language,
+                session_id=question.session_id,
+                sources=[]
+            )
+
+        # Filter by quality FIRST
+        high_quality_chunks = [c for c in relevant_chunks if c.get("score", 0) >= 0.05]
+
+        if question.session_id and not high_quality_chunks:
+            return ChatResponse(
+                answer="I couldn't find relevant information in the document to answer this question.",
+                language=question.language,
+                session_id=question.session_id,
+                sources=[]
+            )
+
+        # THEN build context from high quality chunks only
+        context = "\n\n".join([chunk["chunk_text"] for chunk in high_quality_chunks])
+
+        # THEN truncate
+        max_context_chars = 3500
+        truncated = context[:max_context_chars]
+        truncation_note = "\n[NOTE: Context was truncated due to length.]" if len(context) > max_context_chars else ""
+
         # Prepare prompt with context
         if question.language == "ms":
             prompt = f"""
@@ -48,7 +69,7 @@ async def ask_question(question: QuestionRequest):
             DOKUMEN: {filename}
             
             KONTEKS RELEVAN:
-            {context[:3000]}
+            {truncated}{truncation_note}
             
             SOALAN: {question.text}
             
@@ -56,16 +77,38 @@ async def ask_question(question: QuestionRequest):
             """
         else:
             prompt = f"""
-            You are a document analysis assistant. Answer the question based on the context below.
-            
-            DOCUMENT: {filename}
-            
-            RELEVANT CONTEXT:
-            {context[:3000]}
-            
-            QUESTION: {question.text}
-            
-            ANSWER (based only on the context above):
+            SYSTEM ROLE:
+            You are a strict document analysis assistant used in production software.
+
+            PRIMARY OBJECTIVE:
+            Answer the user's question using ONLY the provided document context.
+
+            NON-NEGOTIABLE RULES:
+            1. Use ONLY facts explicitly stated in the context.
+            2. Do NOT infer, assume, guess, or generalize.
+            3. Do NOT add titles, qualifications, dates, or explanations unless explicitly written.
+            4. If the information is missing, unclear, or not stated, respond EXACTLY with:
+            "I cannot find this information in the document."
+            5. If the context contains repeated or corrupted text, acknowledge it and summarize cautiously.
+            6. NEVER use outside knowledge.
+
+            SELF-CHECK BEFORE ANSWERING:
+            - Can every sentence in my answer be directly traced to the context?
+            - If not, I must refuse.
+
+            DOCUMENT NAME:
+            {filename}
+
+            DOCUMENT CONTEXT:
+            <<<BEGIN CONTEXT>>>
+            {truncated}{truncation_note}
+            <<<END CONTEXT>>>
+
+            USER QUESTION:
+            {question.text}
+
+            FINAL ANSWER:
+            (Answer clearly and concisely. No extra explanations.)
             """
         
         # Call Ollama
@@ -73,11 +116,15 @@ async def ask_question(question: QuestionRequest):
             response = requests.post(
                 "http://localhost:11434/api/generate",
                 json={
-                    "model": "phi:latest",
+                    "model": "mistral:latest",  # or llama3.2
                     "prompt": prompt,
-                    "stream": False
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.1,  # ADD THIS: lower temp = less creativity = less hallucination
+                        "top_p": 0.9
+                    }
                 },
-                timeout=30
+                timeout=60  # mistral needs more time
             )
             
             if response.status_code == 200:

@@ -28,7 +28,8 @@ const formatFileSize = (bytes: number): string => {
 }
 
 const FileList: React.FC = () => {
-  const { files, selectedFileId, setSelectedFile } = useChatStore()
+  const { files, selectedFileId, setSelectedFile, clearChat } = useChatStore()
+
   
   if (files.length === 0) {
     return (
@@ -60,7 +61,10 @@ const FileList: React.FC = () => {
               cursor: 'pointer'
             }
           }}
-          onClick={() => setSelectedFile(file.session_id)}
+          onClick={() => {
+            clearChat()
+            setSelectedFile(file.session_id)
+          }}
         >
           <ListItemIcon>
             {selectedFileId === file.session_id ? (

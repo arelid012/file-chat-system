@@ -21,7 +21,7 @@ class VectorService:
     def create_chunks_and_embeddings(self, text: str, metadata: Dict[str, Any]) -> List[str]:
         """Create embeddings for text and store in vector DB"""
         # Split text into chunks
-        chunks = self._chunk_text(text, chunk_size=1000, overlap=100)
+        chunks = self._chunk_text(text, chunk_size=300, overlap=50)
         
         # Generate embeddings for each chunk
         embeddings = self.embedding_model.encode(chunks).tolist()
@@ -40,54 +40,74 @@ class VectorService:
         return ids
     
     def search_similar_chunks(self, query: str, session_id: str = None, limit: int = 3) -> List[Dict]:
-        """Search for relevant text chunks"""
-        # Generate query embedding
         query_embedding = self.embedding_model.encode(query).tolist()
-        
-        # Build filter
         where_filter = {"session_id": session_id} if session_id else None
-        
-        # Search in vector DB
+
+        # ADD THIS
+        print(f"DEBUG - Searching with session_id: {session_id}")
+        print(f"DEBUG - Total chunks in collection: {self.collection.count()}")
+
         results = self.collection.query(
             query_embeddings=[query_embedding],
             n_results=limit,
             where=where_filter,
             include=["documents", "metadatas", "distances"]
         )
-        
-        # Format results
+
+        print(f"DEBUG - Raw results: {results['distances']}")
+
         formatted = []
         if results['documents']:
-            for i, (doc, meta, dist) in enumerate(zip(
+            for doc, meta, dist in zip(
                 results['documents'][0],
                 results['metadatas'][0],
                 results['distances'][0]
-            )):
+            ):
+                score = 1 - dist
+                print(f"DEBUG chunk score: {score}")
+                if score < 0.05:
+                    continue
                 formatted.append({
                     "chunk_text": doc,
                     "filename": meta.get("filename", "Unknown"),
                     "session_id": meta.get("session_id"),
-                    "score": 1 - dist
+                    "score": score
                 })
-        
+
         return formatted
     
     def delete_session_chunks(self, session_id: str):
         """Delete all embeddings for a session"""
-        self.collection.delete(where={"session_id": session_id})
+        self.collection.delete(where={"session_id": session_id})   
     
-    def _chunk_text(self, text: str, chunk_size: int = 1000, overlap: int = 100) -> List[str]:
-        """Simple text chunking"""
-        words = text.split()
+    def _chunk_text(self, text: str, chunk_size: int = 300, overlap: int = 50) -> List[str]:
+        import re
+
+        text = re.sub(r'\n+', ' ', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+
         chunks = []
-        
-        for i in range(0, len(words), chunk_size - overlap):
-            chunk = " ".join(words[i:i + chunk_size])
-            chunks.append(chunk)
-            
-            if i + chunk_size >= len(words):
-                break
-        
+        current_chunk = []
+        current_length = 0
+
+        for sentence in sentences:
+            word_count = len(sentence.split())
+            current_chunk.append(sentence)
+            current_length += word_count  # ADD FIRST, THEN CHECK
+
+            if current_length >= chunk_size:  # flush when we hit the limit
+                chunks.append(" ".join(current_chunk))
+                # keep last 2 sentences as overlap for next chunk
+                current_chunk = current_chunk[-2:]
+                current_length = sum(len(s.split()) for s in current_chunk)
+
+        # Don't forget remaining sentences
+        if current_chunk:
+            chunks.append(" ".join(current_chunk))
+
+        print(f"DEBUG - Created {len(chunks)} chunks")
         return chunks
 
 vector_service = VectorService()
